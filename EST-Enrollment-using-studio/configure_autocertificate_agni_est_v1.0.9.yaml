@@ -1,0 +1,699 @@
+- service: arista.studio.v1.StudioConfigService
+  method: Set
+  body:
+    value:
+      key:
+        studio_id: 630fed5e-e0f3-485d-9cf8-f936446bc3e7
+        workspace_id: ''
+      created_at: '2026-01-26T18:51:01.507Z'
+      created_by: shaip
+      last_modified_at: '2026-01-26T19:13:49.452Z'
+      last_modified_by: shaip
+      display_name: Shaip - configure AGNI EST v1.0.9
+      description: Configure device with EST and Radsec
+      template:
+        type: TEMPLATE_TYPE_MAKO
+        body: |-
+          <%doc>
+          Written By Shai Perretz 13.9.2025 
+          email: shaip@arista.com
+          This will create a configuration to use EST server and get a certifAdd general dot1x/radius configicate.
+          The auto generated certificate will used to connect to RADESC (AGNI) server. 
+          version 1.0.5
+          </%doc>
+
+          <%
+          from typing import List, Dict
+          from cloudvision.cvlib import ActionFailed
+          import grpc
+          import json
+          from arista.inventory.v1.services import ProvisionedDeviceServiceStub, ProvisionedDeviceRequest,ProvisionedDeviceStreamRequest
+          from arista.inventory.v1 import models
+          from google.protobuf.json_format import Parse
+          from google.protobuf import wrappers_pb2 as wrappers
+           
+          def device_matches_resolver_query(resolver, device_id):
+                if device_id and resolver:
+                      _, ctx_resolver = resolver.resolveWithContext(device_id)
+                else:
+                      return False
+                if ctx_resolver and ctx_resolver.query_str.strip() != "":
+                      return True
+                else:
+                      return False
+
+          def GetDeviceIP():
+                json_request = json.dumps({"key":{"deviceId": str(ctx.getDevice().id)}})
+                req = Parse(json_request, ProvisionedDeviceRequest(), False)
+                sw_stub = ctx.getApiClient(ProvisionedDeviceServiceStub)
+                sw_properties = sw_stub.GetOne(req, timeout=30)
+                return sw_properties.value.ip_address.value
+
+          ctx.info(f"strating getting vars")
+          isDeviceResolved = device_matches_resolver_query(applyDevicesResolver,ctx.getDevice().id )
+          if not isDeviceResolved:
+                ctx.info(f"Switch is not listed on the device resolver, continue to next device")
+                return
+
+          deviceip = GetDeviceIP()
+          hostname = ctx.getDeviceHostname()
+          mac = ctx.getDevice().mac 
+
+          ctx.info(f"ip: {deviceip}") 
+          ctx.info(f"mac: {mac}")
+          ctx.info(f"hostname: {hostname}")
+
+          if applyDevicesResolver:
+                for server in applyDevicesResolver.resolve()['applyDevicesGroup'].items(): 
+                      ctx.info(f"server: {server}")
+                      if server[0] == 'certificateProperties':
+                            commonName = server[1]['commonName']
+                            country = server[1]['country']
+                            state = server[1]['state']
+                            subjectAlternativeNameEmail = server[1]['subjectAlternativeNameEmail']
+                            subjectAlternativeNameUri = server[1]['subjectAlternativeNameUri']
+                            selfSignCertificateFileName = server[1]['selfSignCertificateFileName']
+                            selfSignKeyFileName = server[1]['selfSignKeyFileName']
+                            autoCertProfileName = server[1]['autoCertProfileName']
+                             
+                      endif
+                      if server[0] == 'estServerDetails':
+                            radiusServerHostname = server[1]['radiusServerHostname']
+                            estServerUrl = server[1]['estServerUrl'] 
+                            estSslServerProfileName = server[1]['estSslServerProfileName']
+                            radiusSslServerProfileName = server[1]['radiusSslServerProfileName']
+                            radiusServerGroupName = server[1]['radiusServerGroupName']
+                            radiusSourceInterface = server[1]['radiusSourceInterface']
+                      endif
+                      if server[0] == 'tokens':
+                            enrollmentToken = server[1]['enrollmentToken']
+                            reenrollmentToken = server[1]['reenrollmentToken'] 
+                      endif
+                      if server[0] == 'addGeneralDot1XRadiusConfig':
+                            addGeneralDot1XRadiusConfig = server[1]
+                endfor
+          endif
+
+          if not commonName:
+                 commonName = mac
+          endif
+          %>
+
+          ## add est configuration to device 
+          % if applyDevicesResolver:
+          management security
+                auto-certificate protocol est ${estSslServerProfileName}
+                      server url ${estServerUrl}
+                      server ssl profile agni-server
+                      credentials enroll token ${enrollmentToken}
+                      credentials re-enroll token ${reenrollmentToken}
+          !
+                 auto-certificate profile ${autoCertProfileName}
+                      key ${selfSignKeyFileName}
+                      parameters distinguished-name common-name ${commonName}
+                      parameters distinguished-name country ${country}
+                      parameters distinguished-name state ${state}
+                      parameters subject-alternative-name ip ${deviceip}
+                      parameters subject-alternative-name dns ${hostname}
+                      parameters subject-alternative-name email ${subjectAlternativeNameEmail}
+                      parameters subject-alternative-name uri ${subjectAlternativeNameUri}
+                      protocol instance agni-server
+          !
+          ## Configure the ssl profile used to mutual initial authentication with the EST server (AGNI) 
+                ssl profile ${estSslServerProfileName}
+                      certificate ${selfSignCertificateFileName} key ${selfSignKeyFileName}
+                      trust certificate AGNI_https_server_cert_chain.pem  
+          !
+          ## Configure the ssl profile used to mutual authentication with the RADESC server (AGNI)
+                ssl profile ${radiusSslServerProfileName} 
+                      certificate auto-certificate ${autoCertProfileName}
+                      trust certificate radsec_ca_certificate.pem   
+          !
+          !
+          % endif
+
+          ## add general dot1x and radius configuraion if user specified to do so
+          % if addGeneralDot1XRadiusConfig:
+          radius-server host ${radiusServerHostname} tls ssl-profile ${radiusSslServerProfileName}
+          aaa group server radius ${radiusServerGroupName}
+             server ${radiusServerHostname} tls
+          !      
+          aaa authentication dot1x default group agni-server-group
+          aaa accounting dot1x default start-stop group agni-server-group 
+          !
+          dot1x system-auth-control
+          dot1x protocol lldp bypass
+          dot1x dynamic-authorization
+          dot1x
+             radius av-pair service-type
+             radius av-pair lldp system-name
+             radius av-pair lldp system-description
+          ## In case source interface is mentioned add source interface for radsec communication
+          % if radiusSourceInterface:
+                ip radius source-interface ${radiusSourceInterface}
+          % endif
+          %endif
+
+
+                
+
+           
+      input_schema:
+        fields:
+          values:
+            a9e705a1-930a-4f45-8ee5-b57a0eb79f29:
+              id: a9e705a1-930a-4f45-8ee5-b57a0eb79f29
+              type: INPUT_FIELD_TYPE_STRING
+              name: reenrollmentToken
+              label: reenrollment token
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: null
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            60d516f6-31aa-4ea1-87ed-9dee5beae21b:
+              id: 60d516f6-31aa-4ea1-87ed-9dee5beae21b
+              type: INPUT_FIELD_TYPE_RESOLVER
+              name: applyDevicesResolver
+              label: Apply devices
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props: null
+              group_props: null
+              collection_props: null
+              resolver_props:
+                base_field_id: 90a4d8cb-28fc-4633-98a8-4c6d92ef0b68
+                display_mode: RESOLVER_FIELD_DISPLAY_MODE_SPARSE
+                input_mode: RESOLVER_FIELD_INPUT_MODE_MULTI_DEVICE_TAG
+                input_tag_label: null
+                tag_filter_query: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            684221ef-a427-4b32-a888-bda6eb225c71:
+              id: 684221ef-a427-4b32-a888-bda6eb225c71
+              type: INPUT_FIELD_TYPE_STRING
+              name: estServerUrl
+              label: est server url
+              description: 'To see the est url go to AGNI -> CONCOURSE -> go to AGNI-> concurse -> EST server details for example: https://beta.agni.arista.io/pki/xxx-xxxx-xxxxxxxx '
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: null
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: url
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            90a4d8cb-28fc-4633-98a8-4c6d92ef0b68:
+              id: 90a4d8cb-28fc-4633-98a8-4c6d92ef0b68
+              type: INPUT_FIELD_TYPE_GROUP
+              name: applyDevicesGroup
+              label: Apply devices Group
+              description: Group of members for Apply devices
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props: null
+              group_props:
+                members:
+                  values:
+                    - 566cd4d4-6428-48e4-a7ad-c9df08ee982d
+                    - ee2b1c71-4e3e-43cf-a2f2-9472eccd2020
+                    - cdc60eca-f213-427b-b9c1-f3d24a95ed73
+                    - 94a7c6e5-9f65-4533-a0ab-d7c4ec3a64d6
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            189c3541-4939-4ea4-9dd2-ff3acf395310:
+              id: 189c3541-4939-4ea4-9dd2-ff3acf395310
+              type: INPUT_FIELD_TYPE_STRING
+              name: radiusSourceInterface
+              label: radius source interface
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: null
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            fa713c08-c6ea-4982-b5b7-3a229c2b8433:
+              id: fa713c08-c6ea-4982-b5b7-3a229c2b8433
+              type: INPUT_FIELD_TYPE_STRING
+              name: radiusServerGroupName
+              label: radius server group name
+              description: 'the name of the ssl profile used to authenticate the radisec server certificate for : agni-server-group'
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: agni-server-group
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            cdc60eca-f213-427b-b9c1-f3d24a95ed73:
+              id: cdc60eca-f213-427b-b9c1-f3d24a95ed73
+              type: INPUT_FIELD_TYPE_GROUP
+              name: tokens
+              label: Tokens
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props: null
+              group_props:
+                members:
+                  values:
+                    - a9e705a1-930a-4f45-8ee5-b57a0eb79f29
+                    - 6d4fe84d-be0e-404d-8f12-4bd0ee44a93f
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            bae9d7c8-cedf-4f3e-84f9-023abff4699e:
+              id: bae9d7c8-cedf-4f3e-84f9-023abff4699e
+              type: INPUT_FIELD_TYPE_STRING
+              name: radiusSslServerProfileName
+              label: radius ssl server profile name
+              description: 'the name of the ssl profile used to authenticate the radisec server certificate for example: agni-server-radsec'
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: agni-server-radsec
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            566cd4d4-6428-48e4-a7ad-c9df08ee982d:
+              id: 566cd4d4-6428-48e4-a7ad-c9df08ee982d
+              type: INPUT_FIELD_TYPE_GROUP
+              name: certificateProperties
+              label: certificate properties
+              description: parameters to use for auto certificate creation
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props: null
+              group_props:
+                members:
+                  values:
+                    - 81bd9284-880f-4364-bfdb-73c4498183fd
+                    - df44d240-80c3-43b6-b476-e36b3d57863e
+                    - 0c159540-7658-42ca-8fe1-cc513d6b028e
+                    - ce2b0e1e-4be4-449b-8bb5-57cb26c107ee
+                    - a8923127-da6f-4912-8d4f-00c4c41a8607
+                    - 413fe1b2-34bb-465f-b39d-ba1c5550563a
+                    - a05e770a-3bcb-4dd1-afc7-16ef663f30b3
+                    - e6dc9ab6-a336-4382-95ff-1d098d66a836
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            4b7a3b67-dedd-4e78-90ba-bba047f40bb1:
+              id: 4b7a3b67-dedd-4e78-90ba-bba047f40bb1
+              type: INPUT_FIELD_TYPE_STRING
+              name: radiusServerHostname
+              label: radius server hostname
+              description: hostname of the radius server . To see the hostname  go to AGNI -> System -> RadSec Settings for example radsec.beta.agni.arista.io
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: radsec.beta.agni.arista.io
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            6d4fe84d-be0e-404d-8f12-4bd0ee44a93f:
+              id: 6d4fe84d-be0e-404d-8f12-4bd0ee44a93f
+              type: INPUT_FIELD_TYPE_STRING
+              name: enrollmentToken
+              label: enrollment token
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: null
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            a05e770a-3bcb-4dd1-afc7-16ef663f30b3:
+              id: a05e770a-3bcb-4dd1-afc7-16ef663f30b3
+              type: INPUT_FIELD_TYPE_STRING
+              name: selfSignCertificateFileName
+              label: self sign certificate file name
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: self-signed.crt
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            ce2b0e1e-4be4-449b-8bb5-57cb26c107ee:
+              id: ce2b0e1e-4be4-449b-8bb5-57cb26c107ee
+              type: INPUT_FIELD_TYPE_STRING
+              name: subjectAlternativeNameEmail
+              label: subject-alternative-name email
+              description: 'used for the certificate''s SA URI for example: shaip@arista.com'
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: me@mydomain.com
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            413fe1b2-34bb-465f-b39d-ba1c5550563a:
+              id: 413fe1b2-34bb-465f-b39d-ba1c5550563a
+              type: INPUT_FIELD_TYPE_STRING
+              name: autoCertProfileName
+              label: auto cert profile name
+              description: 'name of the profile for the auto certificate profile, this will also be used as the name of the certificate file for example: myautocert'
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: myautocert
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            df44d240-80c3-43b6-b476-e36b3d57863e:
+              id: df44d240-80c3-43b6-b476-e36b3d57863e
+              type: INPUT_FIELD_TYPE_STRING
+              name: state
+              label: state
+              description: 'IL/US etc '
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: null
+                static_options: null
+                dynamic_options: null
+                length: 2..max
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            2a30f128-fa29-42f3-b5e9-c66796cdfad5:
+              id: 2a30f128-fa29-42f3-b5e9-c66796cdfad5
+              type: INPUT_FIELD_TYPE_STRING
+              name: estSslServerProfileName
+              label: est ssl server profile name
+              description: 'name of the ssl profile to configure on the switch for example: agni-server'
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: agni-server
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            94a7c6e5-9f65-4533-a0ab-d7c4ec3a64d6:
+              id: 94a7c6e5-9f65-4533-a0ab-d7c4ec3a64d6
+              type: INPUT_FIELD_TYPE_BOOLEAN
+              name: addGeneralDot1XRadiusConfig
+              label: Add general dot1x/radius config
+              description: ''
+              required: false
+              boolean_props:
+                default_value: false
+              integer_props: null
+              float_props: null
+              string_props: null
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            81bd9284-880f-4364-bfdb-73c4498183fd:
+              id: 81bd9284-880f-4364-bfdb-73c4498183fd
+              type: INPUT_FIELD_TYPE_STRING
+              name: country
+              label: country
+              description: IL/US etc..
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: IL
+                static_options: null
+                dynamic_options: null
+                length: 2..max
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            0c159540-7658-42ca-8fe1-cc513d6b028e:
+              id: 0c159540-7658-42ca-8fe1-cc513d6b028e
+              type: INPUT_FIELD_TYPE_STRING
+              name: commonName
+              label: common-name
+              description: leave blank if you want studio to use device mac-address - recommended
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: null
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: ^\w+$
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            ee2b1c71-4e3e-43cf-a2f2-9472eccd2020:
+              id: ee2b1c71-4e3e-43cf-a2f2-9472eccd2020
+              type: INPUT_FIELD_TYPE_GROUP
+              name: estServerDetails
+              label: est server details
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props: null
+              group_props:
+                members:
+                  values:
+                    - 684221ef-a427-4b32-a888-bda6eb225c71
+                    - 4b7a3b67-dedd-4e78-90ba-bba047f40bb1
+                    - 2a30f128-fa29-42f3-b5e9-c66796cdfad5
+                    - bae9d7c8-cedf-4f3e-84f9-023abff4699e
+                    - fa713c08-c6ea-4982-b5b7-3a229c2b8433
+                    - 189c3541-4939-4ea4-9dd2-ff3acf395310
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            a8923127-da6f-4912-8d4f-00c4c41a8607:
+              id: a8923127-da6f-4912-8d4f-00c4c41a8607
+              type: INPUT_FIELD_TYPE_STRING
+              name: subjectAlternativeNameUri
+              label: subject-alternative-name uri
+              description: 'used for the certificate''s SA URI for example: http://mysite.mydomain.com'
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: http://mysite.mydomain.com
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: url
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+            root:
+              id: root
+              type: INPUT_FIELD_TYPE_GROUP
+              name: ''
+              label: ''
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props: null
+              group_props:
+                members:
+                  values:
+                    - 60d516f6-31aa-4ea1-87ed-9dee5beae21b
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: null
+              tag_matcher_props: null
+            e6dc9ab6-a336-4382-95ff-1d098d66a836:
+              id: e6dc9ab6-a336-4382-95ff-1d098d66a836
+              type: INPUT_FIELD_TYPE_STRING
+              name: selfSignKeyFileName
+              label: self sign key file name
+              description: ''
+              required: false
+              boolean_props: null
+              integer_props: null
+              float_props: null
+              string_props:
+                default_value: self-signed.key
+                static_options: null
+                dynamic_options: null
+                length: null
+                pattern: null
+                format: null
+                is_secret: false
+                extra_values_allowed: false
+              group_props: null
+              collection_props: null
+              resolver_props: null
+              auto_fill_action_id: ''
+              tag_matcher_props: null
+        layout:
+          value: '{"ntpServerDetails":{"key":"ntpServerDetails","order":["965e19d4-29af-442d-960b-733cf0ed8e90","80b174e3-c0b7-451f-98be-044f569665d4","f65644b3-5f82-4d52-a779-c6bac8af5739","cae27dfd-bab7-429a-9c42-2a71ec2a1f87"],"type":"INPUT"},"vrf":{"key":"vrf","type":"INPUT"},"ntpServer":{"key":"ntpServer","type":"INPUT"},"37d020df-c01b-406d-bf34-6bbf2c356ac0":{"key":"37d020df-c01b-406d-bf34-6bbf2c356ac0","type":"INPUT"},"ntpServerResolver":{"key":"ntpServerResolver","type":"INPUT","order":["ntpServers"]},"90a4d8cb-28fc-4633-98a8-4c6d92ef0b68":{"key":"90a4d8cb-28fc-4633-98a8-4c6d92ef0b68","order":["566cd4d4-6428-48e4-a7ad-c9df08ee982d","ee2b1c71-4e3e-43cf-a2f2-9472eccd2020","cdc60eca-f213-427b-b9c1-f3d24a95ed73","94a7c6e5-9f65-4533-a0ab-d7c4ec3a64d6"],"dependency":{"90a4d8cb-28fc-4633-98a8-4c6d92ef0b68":{"value":["__ANY__"],"mode":"HIDE"}},"dependencyType":"AND","type":"INPUT"},"ee2b1c71-4e3e-43cf-a2f2-9472eccd2020":{"key":"ee2b1c71-4e3e-43cf-a2f2-9472eccd2020","order":["684221ef-a427-4b32-a888-bda6eb225c71","2a30f128-fa29-42f3-b5e9-c66796cdfad5","4b7a3b67-dedd-4e78-90ba-bba047f40bb1","bae9d7c8-cedf-4f3e-84f9-023abff4699e","fa713c08-c6ea-4982-b5b7-3a229c2b8433","189c3541-4939-4ea4-9dd2-ff3acf395310"],"type":"INPUT","dependency":{"8b441012-c5fc-42ed-a53c-f533fcbf19c1":{"value":[true],"mode":"SHOW"}}},"566cd4d4-6428-48e4-a7ad-c9df08ee982d":{"key":"566cd4d4-6428-48e4-a7ad-c9df08ee982d","type":"INPUT","dependency":{"8b441012-c5fc-42ed-a53c-f533fcbf19c1":{"value":[true],"mode":"SHOW"}}},"cdc60eca-f213-427b-b9c1-f3d24a95ed73":{"key":"cdc60eca-f213-427b-b9c1-f3d24a95ed73","type":"INPUT","dependency":{"8b441012-c5fc-42ed-a53c-f533fcbf19c1":{"value":[true],"mode":"SHOW"}},"order":["6d4fe84d-be0e-404d-8f12-4bd0ee44a93f","a9e705a1-930a-4f45-8ee5-b57a0eb79f29"]},"60d516f6-31aa-4ea1-87ed-9dee5beae21b":{"key":"60d516f6-31aa-4ea1-87ed-9dee5beae21b","isPageLayout":false,"type":"INPUT","showDefaultRow":false}}'
+      from_package: ''
