@@ -1,11 +1,12 @@
 # EST Enrollment using studio
  This example studio and action package can be used to generate the necessary EOS configuration for EST protocol.
  
-Prerequisite:
+Prerequisite for using the EST Studio:
  1. Download CA certificate of the EST and Radsec to local directory
- 2. intstall into cvaas the latest certificate_management package "pkg-est-certmgt_x.y.z"
- 3. Use the certificate_management to create a self signed certificate for each switch.
- 4. Use the certificate_management to push both EST & Radsec CA certificate into each switch (directory "certificate:").
+ 2. intstall into cvaas the latest package certificate_management_x.y.z.tar
+ 3. Use the certificate_management to bulk create a self signed certificate for each switch.
+ 4. Use the certificate_management to bulk push both EST & Radsec CA certificate into each switch (directory "certificate:").
+
 
 How to use this studio:
 1. Fill in the information used to generatae the auto-certficaite using EST protocol.
